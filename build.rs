@@ -30,10 +30,12 @@ fn set_resource_info() {
     res.set("CompanyName", "vladsomware");
     res.set("FileVersion", "0.0.1");
 
-    res.compile().expect("failed to compile VLadsomware");
+    res.compile().expect("failed to compile VLadsomware2");
 }
 
 fn main() {
     println!("cargo:rerun-if-changed=rsrc/vladsomware.png");
+    println!("cargo:rerun-if-changed=rsrc/lock.png");
+    println!("cargo:rerun-if-changed=rsrc/unlock.png");
     set_resource_info();
 }

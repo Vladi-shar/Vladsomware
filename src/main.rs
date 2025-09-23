@@ -1,4 +1,6 @@
+mod encryptor;
 
+use crate::encryptor::Encryptor;
 use eframe::{
     egui::{self, CentralPanel},
     run_native,
@@ -8,9 +10,13 @@ use egui::{
     Button, Color32, ColorImage, Context, FontId, IconData, Image, InnerResponse, RichText,
     TextStyle, TextureHandle, TextureOptions, Ui, ViewportBuilder,
 };
+use std::{fs::File, io::Write};
 
 struct VladsomwareApp {
     directory: String,
+    key_path: String,
+    key_saved_or_loaded: bool,
+    encryptor: Encryptor,
     recursive: bool,
     multi_threaded: bool,
 
@@ -33,6 +39,9 @@ impl VladsomwareApp {
 
         Self {
             directory: String::new(),
+            key_path: String::new(),
+            key_saved_or_loaded: false,
+            encryptor: Encryptor::new().unwrap(),
             recursive: false,
             multi_threaded: false,
             encrypt_tex: icon_texture_from_icon_data(
@@ -93,13 +102,63 @@ fn render_dir_selector(
             ui.add(egui::TextEdit::singleline(modified_path).desired_width(250.0))
                 .on_hover_text(hover_text);
             if ui.button("Browse...").on_hover_text(hover_text).clicked() {
+                if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                    *modified_path = path.display().to_string().replace("\\", "\\\\");
+                }
             }
             ui.add_space(10.0);
         });
         ui.add_space(10.0);
     })
 }
-fn render_encryption_key_handler(_app: &mut VladsomwareApp, ui: &mut Ui) -> InnerResponse<()> {
+
+fn load_key(app: &mut VladsomwareApp) -> Result<(), String> {
+    let path = rfd::FileDialog::new()
+        .set_title("Load Encryption Key")
+        .add_filter("Key files", &["key", "bin"])
+        .add_filter("All files", &["*"])
+        .pick_file()
+        .ok_or("No File Selected")?;
+
+    app.encryptor
+        .load_key(&path)
+        .map_err(|e| format!("Failed to generate key: {}", e))?;
+    app.key_saved_or_loaded = true;
+    app.key_path = path.display().to_string();
+
+    Ok(())
+}
+
+fn generate_and_save_key(app: &mut VladsomwareApp) -> Result<(), String> {
+    let path = rfd::FileDialog::new()
+        .set_title("Save Encryption Key")
+        .set_file_name("encryption_key.bin")
+        .add_filter("Key files", &["key", "bin"])
+        .add_filter("All files", &["*"])
+        .save_file()
+        .ok_or("No File Selected")?;
+
+    app.key_path = path.display().to_string();
+
+    app.encryptor
+        .gen_key(
+            path.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default()
+                .to_string(),
+        )
+        .map_err(|e| format!("Failed to generate key: {}", e))?;
+
+    let mut file = File::create(&path).map_err(|e| format!("Failed to create file: {}", e))?;
+
+    file.write_all(&app.encryptor.key)
+        .map_err(|e| format!("Failed to write key: {}", e))?;
+
+    app.key_saved_or_loaded = true;
+    Ok(())
+}
+
+fn render_encryption_key_handler(app: &mut VladsomwareApp, ui: &mut Ui) -> InnerResponse<()> {
     ui.vertical(|ui| {
         ui.horizontal(|ui| {
             ui.add_space(10.0);
@@ -113,6 +172,7 @@ fn render_encryption_key_handler(_app: &mut VladsomwareApp, ui: &mut Ui) -> Inne
                 .on_hover_text("Load key to use for encryption\\decryption")
                 .clicked()
             {
+                load_key(app).map_err(|_e| {}).unwrap_or_default();
             };
             ui.add_space(10.0);
             ui.label("Or");
@@ -122,6 +182,9 @@ fn render_encryption_key_handler(_app: &mut VladsomwareApp, ui: &mut Ui) -> Inne
                 .on_hover_text("Generate a key to use and save it")
                 .clicked()
             {
+                generate_and_save_key(app)
+                    .map_err(|_e| {})
+                    .unwrap_or_default();
             }
         });
         ui.add_space(10.0);

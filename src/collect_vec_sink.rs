@@ -1,9 +1,9 @@
 use atomic::{Atomic, Ordering};
 use spdlog::{
-    formatter::{pattern, Formatter, FormatterContext, PatternFormatter}, prelude::*, sink::Sink,
-    ErrorHandler,
-    Record,
-    StringBuf,
+    ErrorHandler, Record, StringBuf,
+    formatter::{Formatter, FormatterContext, PatternFormatter, pattern},
+    prelude::*,
+    sink::Sink,
 };
 use spin::{Mutex, RwLock};
 
@@ -44,7 +44,10 @@ impl Sink for CollectVecSink {
         self.formatter
             .read()
             .format(record, &mut string_buf, &mut ctx)?;
-        self.collected.lock().push(LogContext{payload:string_buf.to_string(), level:record.level()});
+        self.collected.lock().push(LogContext {
+            payload: string_buf.to_string(),
+            level: record.level(),
+        });
         Ok(())
     }
 

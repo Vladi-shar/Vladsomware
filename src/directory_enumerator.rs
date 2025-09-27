@@ -1,15 +1,17 @@
 use std::ffi::{OsStr, OsString};
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
-use windows::core::{Error, PCWSTR};
-use windows::Win32::Foundation::{GetLastError, ERROR_NO_MORE_FILES, HANDLE};
+use windows::Win32::Foundation::{ERROR_NO_MORE_FILES, GetLastError, HANDLE};
 use windows::Win32::Storage::FileSystem::{
     FindClose, FindFirstFileW, FindNextFileW, WIN32_FIND_DATAW,
 };
+use windows::core::{Error, PCWSTR};
 
 struct FindHandle(HANDLE);
 impl Drop for FindHandle {
     fn drop(&mut self) {
-        unsafe { let _ = FindClose(self.0); };
+        unsafe {
+            let _ = FindClose(self.0);
+        };
     }
 }
 
@@ -43,6 +45,10 @@ where
 }
 
 pub fn name_from_find(fd: &WIN32_FIND_DATAW) -> OsString {
-    let len = fd.cFileName.iter().position(|&c| c == 0).unwrap_or(fd.cFileName.len());
+    let len = fd
+        .cFileName
+        .iter()
+        .position(|&c| c == 0)
+        .unwrap_or(fd.cFileName.len());
     OsString::from_wide(&fd.cFileName[..len])
 }

@@ -2,16 +2,21 @@
 mod collect_vec_sink;
 mod directory_enumerator;
 mod encryptor;
+mod progress;
 
 use crate::collect_vec_sink::CollectVecSink;
-use crate::encryptor::Encryptor;
+use crate::encryptor::{EncryptionMode, Encryptor};
+use crate::progress::Progress;
 use eframe::{
     egui::{self, CentralPanel},
     run_native,
     App,
 };
-use egui::{Button, Color32, ColorImage, Context, FontId, IconData, Image, InnerResponse, RichText, TextStyle, TextureHandle, TextureOptions, TopBottomPanel, Ui, ViewportBuilder};
-use spdlog::{prelude::*};
+use egui::{
+    Button, Color32, ColorImage, Context, FontId, IconData, Image, InnerResponse, ProgressBar,
+    RichText, TextStyle, TextureHandle, TextureOptions, TopBottomPanel, Ui, ViewportBuilder,
+};
+use spdlog::prelude::*;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::{fs::File, io::Write};
@@ -28,6 +33,8 @@ struct VladsomwareApp {
     decrypt_tex: TextureHandle,
 
     log_sink: Arc<CollectVecSink>,
+    current_mode: EncryptionMode,
+    current_progress: Option<Arc<Progress>>,
 }
 
 fn icon_texture_from_icon_data(ctx: &Context, id: &str, icon: &IconData) -> TextureHandle {
@@ -66,6 +73,8 @@ impl VladsomwareApp {
                 &decrypt_icon,
             ),
             log_sink: vector_sink.clone(),
+            current_mode: EncryptionMode::Encrypt,
+            current_progress: None,
         }
     }
 }
@@ -261,11 +270,13 @@ impl VladsomwareApp {
                 .on_hover_text(hover_text)
                 .clicked()
             {
-                if encryption {
-                    self.encryptor.encrypt_dir(&self.directory);
+                self.current_progress = Some(if encryption {
+                    self.current_mode = EncryptionMode::Encrypt;
+                    self.encryptor.encrypt_dir(&self.directory)
                 } else {
-                    self.encryptor.decrypt_dir(&self.directory);
-                }
+                    self.current_mode = EncryptionMode::Decrypt;
+                    self.encryptor.decrypt_dir(&self.directory)
+                })
             };
             ui.add_space(20.0);
         })
@@ -289,6 +300,34 @@ impl VladsomwareApp {
             false,
             Color32::from_rgb(155, 176, 179),
         )
+    }
+
+    fn render_progress_bar(&mut self, ui: &mut Ui, ctx: &egui::Context) -> InnerResponse<()> {
+        ui.horizontal(|ui| {
+            ui.add_space(20.0);
+            let (frac, finished) = if let Some(p) = &self.current_progress {
+                let s = p.snapshot();
+                let frac = if s.total == 0 {
+                    0.0
+                } else if s.finished {
+                    1.0
+                } else {
+                    (s.done as f32) / (s.total as f32)
+                };
+                (frac, s.finished)
+            } else {
+                (0.0, true) // default when nothing is running
+            };
+            let mut pb = ProgressBar::new(frac).show_percentage().animate(true);
+            if frac == 0.0 {
+                pb = pb.fill(Color32::from_rgba_unmultiplied(0, 0, 0, 0));
+            }
+            ui.add_sized([340.0, 20.0], pb);
+
+            if !finished {
+                ctx.request_repaint_after(std::time::Duration::from_millis(33));
+            }
+        })
     }
 
     fn save_logs(&mut self) -> Result<(), String> {
@@ -364,14 +403,14 @@ impl App for VladsomwareApp {
                     ui.add_space(5.0);
                     self.render_decrypt_button(ui);
                     ui.add_space(5.0);
+                    self.render_progress_bar(ui, ctx);
                     ui.add_space(5.0);
-
                 });
             });
         });
 
         TopBottomPanel::bottom("Logs")
-            .exact_height(120.0)
+            .exact_height(145.0)
             .show(ctx, |ui| {
                 self.render_logs(ui);
             });

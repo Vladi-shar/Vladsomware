@@ -1,6 +1,6 @@
 use crate::directory_enumerator::{enumerate_dir_entries, name_from_find};
 use crate::progress::Progress;
-use spdlog::{error, info, warn};
+use spdlog::{debug, error, info, warn};
 use std::cmp::PartialEq;
 use std::collections::LinkedList;
 use std::ffi::{c_void, OsStr, OsString};
@@ -200,18 +200,37 @@ impl InnerEncryptor {
             .ok()?;
             self.set_gcm_chaining_mode((*self.key_handle).into())?;
             self.key = self.export_key_data_blob()?;
+            debug!("generated key: {:?}", self.key);
             self.key_file_name = OsString::from(key_file_name);
 
             Ok(())
         }
     }
 
-    fn should_skip_dir_entry(&mut self, file_name: &OsString) -> bool {
-        file_name == OsStr::new(".")
-            || file_name == OsStr::new("..")
-            || file_name == &self.key_file_name
-            || (self.encryption_mode == EncryptionMode::Encrypt
-                && Path::new(file_name).extension() == Some(&self.encryption_extension))
+    fn is_directory(&self, fd: &WIN32_FIND_DATAW) -> bool {
+        fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0
+    }
+
+    fn should_skip_dir_entry(&self, fd: &WIN32_FIND_DATAW) -> bool {
+        // Skip dot entries always
+        let file_name = name_from_find(fd); // OsString
+        if file_name == OsStr::new(".") || file_name == OsStr::new("..") {
+            return true;
+        }
+
+        // Never skip directories here; recursion decides
+        if self.is_directory(&fd) {
+            return false;
+        }
+
+        // Files: check extension match
+        let ext = Path::new(&file_name).extension();               // Option<&OsStr>
+        let matches = ext == Some(self.encryption_extension.as_os_str());
+
+        match self.encryption_mode {
+            EncryptionMode::Encrypt => matches,   // skip files already encrypted
+            EncryptionMode::Decrypt => !matches,  // skip files not having the tag (including None)
+        }
     }
 
     fn gen_nonce12(&self) -> [u8; 12] {
@@ -344,7 +363,12 @@ impl InnerEncryptor {
             remaining -= want as u64;
             progress.add_done(want as u64);
         }
-
+        debug!(
+            "encrypted {} to {} in {} chunks",
+            in_path.display(),
+            out_path.display(),
+            counter
+        );
         w.flush()?;
         Ok(())
     }
@@ -391,7 +415,12 @@ impl InnerEncryptor {
             remaining -= want as u64;
             progress.add_done(want as u64);
         }
-
+        debug!(
+            "decrypted {} to {} in {} chunks",
+            in_path.display(),
+            out_path.display(),
+            counter
+        );
         w.flush()?;
         Ok(())
     }
@@ -417,51 +446,53 @@ impl InnerEncryptor {
         dir: &Path,
         fd: &WIN32_FIND_DATAW,
         depth: i32,
-        total_bytes: u64,
         progress: &Progress,
     ) {
-        let file_name = name_from_find(fd);
-        if self.should_skip_dir_entry(&file_name) {
+        debug!("processing {}", dir.display());
+        if self.should_skip_dir_entry(&fd) {
             return;
         }
         let mut fp = dir.to_owned();
-        fp.push(file_name);
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0) && self.recursive {
-            self.act_on_dir(&fp, depth + 1, total_bytes, &progress);
+        fp.push(name_from_find(fd));
+        if self.recursive && self.is_directory(&fd) {
+            self.act_on_dir(&fp, depth + 1, &progress);
         } else {
             match self.encryption_mode {
                 EncryptionMode::Encrypt => {
+                    debug!("encrypting {}", fp.display());
                     self.encrypt_file(&fp, &progress).unwrap_or_else(|e| {
                         error!("Failed to encrypt file {}, Error: {:?}", fp.display(), e);
                     });
                 }
-                EncryptionMode::Decrypt => self.decrypt_file(&fp, &progress).unwrap_or_else(|e| {
-                    error!("Failed to decrypt file {}, Error: {:?}", fp.display(), e);
-                }),
+                EncryptionMode::Decrypt => {
+                    debug!("decrypting {}", fp.display());
+                    self.decrypt_file(&fp, &progress).unwrap_or_else(|e| {
+                        error!("Failed to decrypt file {}, Error: {:?}", fp.display(), e);
+                    })
+                }
             }
         }
     }
 
-    fn act_on_dir(&mut self, dir: &Path, depth: i32, total_bytes: u64, progress: &Progress) {
+    fn act_on_dir(&mut self, dir: &Path, depth: i32, progress: &Progress) {
         if depth > 15 {
             error!("too deep: {}", dir.display());
         }
         let mut search_pattern = dir.to_owned();
         search_pattern.push("*");
         let _result = enumerate_dir_entries(search_pattern, |fd| {
-            self.act_on_dir_entry(dir, fd, depth, total_bytes, progress)
+            self.act_on_dir_entry(dir, fd, depth, progress)
         })
         .map_err(|e| {
             error!("Error enumerating directory entries: {}", e);
         });
     }
     fn compute_entry_size(&mut self, dir: &Path, fd: &WIN32_FIND_DATAW, depth: i32) -> u64 {
-        let file_name = name_from_find(&fd);
-        if self.should_skip_dir_entry(&file_name) {
+        if self.should_skip_dir_entry(&fd) {
             return 0;
         }
         let mut fp = dir.to_owned();
-        fp.push(file_name);
+        fp.push(name_from_find(&fd));
         if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY.0) != 0) && self.recursive {
             self.compute_dir_size(&fp, depth + 1)
         } else {
@@ -472,13 +503,25 @@ impl InnerEncryptor {
         let mut search_pattern = dir.to_owned();
         search_pattern.push("*");
         let mut total_bytes: u64 = 0;
+        let mut num_files = 0;
         let result = enumerate_dir_entries(search_pattern, |fd| {
             total_bytes += self.compute_entry_size(dir, fd, depth);
+            num_files += 1;
         });
-        if result.is_ok() { total_bytes } else { 0 }
+        if result.is_ok() {
+            debug!("found {} files", num_files);
+            total_bytes
+        } else {
+            error!(
+                "Error enumerating directory entries: {}",
+                result.err().unwrap()
+            );
+            0
+        }
     }
 
     fn encrypt_dir(&mut self, dir_path: &Path, progress: &Progress) {
+        debug!("Encrypting directory {}", dir_path.display());
         self.encryption_mode = EncryptionMode::Encrypt;
         let total_size_bytes = self.compute_dir_size(dir_path, 0);
         info!(
@@ -492,12 +535,13 @@ impl InnerEncryptor {
             progress.mark_finished();
             return;
         }
-        self.act_on_dir(dir_path, 0, total_size_bytes, &progress);
+        self.act_on_dir(dir_path, 0, &progress);
         info!("Encrypted \"{}\"", dir_path.display());
         progress.mark_finished();
     }
 
     fn decrypt_dir(&mut self, dir_path: &Path, progress: &Progress) {
+        debug!("Decrypting \"{}\"", dir_path.display());
         self.encryption_mode = EncryptionMode::Decrypt;
         let total_size_bytes = self.compute_dir_size(dir_path, 0);
         info!(
@@ -511,7 +555,7 @@ impl InnerEncryptor {
             progress.mark_finished();
             return;
         }
-        self.act_on_dir(dir_path, 0, total_size_bytes, &progress);
+        self.act_on_dir(dir_path, 0, &progress);
         info!("Decrypted \"{}\"", dir_path.display());
         progress.mark_finished();
     }

@@ -1,4 +1,5 @@
-#![windows_subsystem = "windows"]
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod collect_vec_sink;
 mod directory_enumerator;
 mod encryptor;
@@ -27,7 +28,7 @@ struct VladsomwareApp {
     key_saved_or_loaded: bool,
     encryptor: Encryptor,
     recursive: bool,
-    multi_threaded: bool,
+    verbose: bool,
 
     encrypt_tex: TextureHandle,
     decrypt_tex: TextureHandle,
@@ -52,6 +53,7 @@ impl VladsomwareApp {
 
         let vector_sink = Arc::new(CollectVecSink::new());
         let logger = Arc::new(Logger::builder().sink(vector_sink.clone()).build().unwrap());
+        logger.set_level_filter(LevelFilter::MoreSevereEqual(Level::Info));
         spdlog::set_default_logger(logger.clone());
 
         info!("Vladsomware2 started");
@@ -61,7 +63,7 @@ impl VladsomwareApp {
             key_saved_or_loaded: false,
             encryptor: Encryptor::new().unwrap(),
             recursive: false,
-            multi_threaded: false,
+            verbose: false,
             encrypt_tex: icon_texture_from_icon_data(
                 &cc.egui_ctx,
                 "encrypt_icon_tex",
@@ -128,6 +130,7 @@ impl VladsomwareApp {
 
                 if ui.button("Browse...").on_hover_text(hover_text).clicked() {
                     if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                        debug!("Set directory: {}", self.directory.display());
                         self.directory = path;
                     } else {
                         warn!("No directory selected");
@@ -152,7 +155,7 @@ impl VladsomwareApp {
             .map_err(|e| format!("Failed to generate key: {}", e))?;
         self.key_saved_or_loaded = true;
         self.key_path = path.display().to_string();
-
+        debug!("Loaded encryption key: {}", self.key_path);
         Ok(())
     }
 
@@ -182,6 +185,7 @@ impl VladsomwareApp {
             .map_err(|e| format!("Failed to write key: {}", e))?;
 
         self.key_saved_or_loaded = true;
+        debug!("Saved encryption key: {}", self.key_path);
         Ok(())
     }
 
@@ -229,14 +233,29 @@ impl VladsomwareApp {
             ui.add_space(10.0);
             ui.vertical(|ui| {
                 ui.add_space(10.0);
-                let rec_response = ui
+                let mut rec_response = ui
                     .checkbox(&mut self.recursive, "Recursive")
                     .on_hover_text("Recursively Encrypt\\Decrypt all sub folders");
                 if rec_response.changed() {
                     self.encryptor.set_recursive(self.recursive);
+                    debug!("Recursive Encrypt: {}", self.recursive);
                 }
-                ui.checkbox(&mut self.multi_threaded, "Multi-Threaded")
-                    .on_hover_text("Encrypt\\Decrypt using multiple threads");
+                // @todo(vladi) implement multi threaded encryption.
+                // ui.checkbox(&mut self.multi_threaded, "Multi-Threaded")
+                //     .on_hover_text("Encrypt\\Decrypt using multiple threads");
+                rec_response = ui
+                    .checkbox(&mut self.verbose, "Verbose Logging")
+                    .on_hover_text("Get Verbose logging information");
+                if rec_response.changed() {
+                    spdlog::default_logger().set_level_filter(if self.verbose {
+                        LevelFilter::MoreSevereEqual(Level::Debug)
+                    } else {
+                        LevelFilter::MoreSevereEqual(Level::Info)
+                    });
+                    if self.verbose {
+                        debug!("Verbose logging enabled");
+                    }
+                }
                 ui.add_space(10.0);
             });
         })
@@ -318,7 +337,7 @@ impl VladsomwareApp {
             } else {
                 (0.0, true) // default when nothing is running
             };
-            let mut pb = ProgressBar::new(frac).show_percentage().animate(true);
+            let mut pb = ProgressBar::new(frac).show_percentage();
             if frac == 0.0 {
                 pb = pb.fill(Color32::from_rgba_unmultiplied(0, 0, 0, 0));
             }
@@ -410,7 +429,7 @@ impl App for VladsomwareApp {
         });
 
         TopBottomPanel::bottom("Logs")
-            .exact_height(145.0)
+            .exact_height(155.0)
             .show(ctx, |ui| {
                 self.render_logs(ui);
             });
@@ -419,7 +438,7 @@ impl App for VladsomwareApp {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut viewport_builder = ViewportBuilder::default()
-        .with_inner_size([400.0, 530.0])
+        .with_inner_size([400.0, 550.0])
         .with_resizable(false);
     if let Some(icon) = load_icon_safe(include_bytes!("../rsrc/vladsomware.png")) {
         viewport_builder = viewport_builder.with_icon(icon);

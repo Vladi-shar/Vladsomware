@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use atomic::{Atomic, Ordering};
 use spdlog::{
     ErrorHandler, Record, StringBuf,
@@ -6,6 +7,7 @@ use spdlog::{
     sink::Sink,
 };
 use spin::{Mutex, RwLock};
+const MAX_LOGS: usize = 10000;
 
 #[derive(Clone)]
 pub(crate) struct LogContext {
@@ -17,7 +19,7 @@ pub(crate) struct CollectVecSink {
     level_filter: Atomic<LevelFilter>,
     formatter: RwLock<Box<dyn Formatter>>,
     error_handler: Atomic<Option<ErrorHandler>>,
-    collected: Mutex<Vec<LogContext>>,
+    collected: Mutex<VecDeque<LogContext>>,
 }
 
 impl CollectVecSink {
@@ -28,11 +30,11 @@ impl CollectVecSink {
                 "[{time}.{millisecond}] [{^{level_short}}] {payload}"
             )))),
             error_handler: Atomic::new(None),
-            collected: Mutex::new(Vec::new()),
+            collected: Mutex::new(VecDeque::with_capacity(MAX_LOGS)),
         }
     }
 
-    pub(crate) fn collected(&self) -> Vec<LogContext> {
+    pub(crate) fn collected(&self) -> VecDeque<LogContext> {
         self.collected.lock().clone()
     }
 }
@@ -44,7 +46,11 @@ impl Sink for CollectVecSink {
         self.formatter
             .read()
             .format(record, &mut string_buf, &mut ctx)?;
-        self.collected.lock().push(LogContext {
+        let mut q = self.collected.lock();
+        if q.len() == MAX_LOGS {
+            q.pop_front();
+        }
+        q.push_back(LogContext {
             payload: string_buf.to_string(),
             level: record.level(),
         });

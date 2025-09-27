@@ -1,18 +1,20 @@
-mod encryptor;
+#![windows_subsystem = "windows"]
+mod collect_vec_sink;
 mod directory_enumerator;
+mod encryptor;
 
-use crate::encryptor::{Encryptor};
+use crate::collect_vec_sink::CollectVecSink;
+use crate::encryptor::Encryptor;
 use eframe::{
     egui::{self, CentralPanel},
     run_native,
     App,
 };
-use egui::{
-    Button, Color32, ColorImage, Context, FontId, IconData, Image, InnerResponse, RichText,
-    TextStyle, TextureHandle, TextureOptions, Ui, ViewportBuilder,
-};
-use std::{fs::File, io::Write};
+use egui::{Button, Color32, ColorImage, Context, FontId, IconData, Image, InnerResponse, RichText, TextStyle, TextureHandle, TextureOptions, TopBottomPanel, Ui, ViewportBuilder};
+use spdlog::{prelude::*};
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::{fs::File, io::Write};
 
 struct VladsomwareApp {
     directory: PathBuf,
@@ -24,6 +26,8 @@ struct VladsomwareApp {
 
     encrypt_tex: TextureHandle,
     decrypt_tex: TextureHandle,
+
+    log_sink: Arc<CollectVecSink>,
 }
 
 fn icon_texture_from_icon_data(ctx: &Context, id: &str, icon: &IconData) -> TextureHandle {
@@ -39,6 +43,11 @@ impl VladsomwareApp {
         let encrypt_icon = load_icon_safe(include_bytes!("../rsrc/lock.ico")).unwrap_or_default();
         let decrypt_icon = load_icon_safe(include_bytes!("../rsrc/unlock.ico")).unwrap_or_default();
 
+        let vector_sink = Arc::new(CollectVecSink::new());
+        let logger = Arc::new(Logger::builder().sink(vector_sink.clone()).build().unwrap());
+        spdlog::set_default_logger(logger.clone());
+
+        info!("Vladsomware2 started");
         Self {
             directory: PathBuf::new(),
             key_path: String::new(),
@@ -56,6 +65,7 @@ impl VladsomwareApp {
                 "decrypt_icon_tex",
                 &decrypt_icon,
             ),
+            log_sink: vector_sink.clone(),
         }
     }
 }
@@ -71,238 +81,304 @@ fn load_icon_safe(icon_bytes: &[u8]) -> Option<IconData> {
     })
 }
 
-fn set_style(ctx: &Context) {
-    let mut style = (*ctx.style()).clone();
-    style.text_styles = [
-        (TextStyle::Heading, FontId::proportional(24.0)),
-        (TextStyle::Body, FontId::proportional(18.0)),
-        (TextStyle::Monospace, FontId::monospace(18.0)),
-        (TextStyle::Button, FontId::proportional(18.0)),
-        (TextStyle::Small, FontId::proportional(14.0)),
-    ]
-    .into();
-    ctx.set_style(style);
+impl VladsomwareApp {
+    fn set_style(&mut self, ctx: &Context) {
+        let mut style = (*ctx.style()).clone();
+        style.text_styles = [
+            (TextStyle::Heading, FontId::proportional(24.0)),
+            (TextStyle::Body, FontId::proportional(18.0)),
+            (TextStyle::Monospace, FontId::monospace(18.0)),
+            (TextStyle::Button, FontId::proportional(18.0)),
+            (TextStyle::Small, FontId::proportional(14.0)),
+        ]
+        .into();
+        ctx.set_style(style);
 
-    if !ctx.style().visuals.dark_mode {
-        ctx.set_visuals(egui::Visuals::dark());
+        if !ctx.style().visuals.dark_mode {
+            ctx.set_visuals(egui::Visuals::dark());
+        }
     }
-}
 
-fn render_dir_selector(
-    ui: &mut egui::Ui,
-    modified_path: &mut PathBuf,
-    hover_text: &str,
-) -> InnerResponse<()> {
-    ui.vertical(|ui| {
-        ui.horizontal(|ui| {
-            ui.add_space(10.0);
-            ui.label("Directory to encrypt");
-        });
-        ui.add_space(10.0);
-        ui.horizontal(|ui| {
-            ui.add_space(10.0);
-            let mut path_str = modified_path.display().to_string();
-            let text_edit_response = ui.add(egui::TextEdit::singleline(&mut path_str).desired_width(250.0))
-                .on_hover_text(hover_text);
-
-            if text_edit_response.changed() {
-                *modified_path = PathBuf::from(path_str);
-            }
-
-            if ui.button("Browse...").on_hover_text(hover_text).clicked() {
-                if let Some(path) = rfd::FileDialog::new().pick_folder() {
-                    *modified_path = path;
-                }
-            }
-            ui.add_space(10.0);
-        });
-        ui.add_space(10.0);
-    })
-}
-
-fn load_key(app: &mut VladsomwareApp) -> Result<(), String> {
-    let path = rfd::FileDialog::new()
-        .set_title("Load Encryption Key")
-        .add_filter("Key files", &["key", "bin"])
-        .add_filter("All files", &["*"])
-        .pick_file()
-        .ok_or("No File Selected")?;
-
-    app.encryptor
-        .load_key(&path)
-        .map_err(|e| format!("Failed to generate key: {}", e))?;
-    app.key_saved_or_loaded = true;
-    app.key_path = path.display().to_string();
-
-    Ok(())
-}
-
-fn generate_and_save_key(app: &mut VladsomwareApp) -> Result<(), String> {
-    let path = rfd::FileDialog::new()
-        .set_title("Save Encryption Key")
-        .set_file_name("encryption_key.bin")
-        .add_filter("Key files", &["key", "bin"])
-        .add_filter("All files", &["*"])
-        .save_file()
-        .ok_or("No File Selected")?;
-
-    app.key_path = path.display().to_string();
-
-    app.encryptor
-        .gen_key(
-            path.file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or_default()
-                .to_string(),
-        )
-        .map_err(|e| format!("Failed to generate key: {}", e))?;
-
-    let mut file = File::create(&path).map_err(|e| format!("Failed to create file: {}", e))?;
-
-    file.write_all(&app.encryptor.get_key_blob().unwrap())
-        .map_err(|e| format!("Failed to write key: {}", e))?;
-
-    app.key_saved_or_loaded = true;
-    Ok(())
-}
-
-fn render_encryption_key_handler(app: &mut VladsomwareApp, ui: &mut Ui) -> InnerResponse<()> {
-    ui.vertical(|ui| {
-        ui.horizontal(|ui| {
-            ui.add_space(10.0);
-            ui.label("Encryption Key");
-        });
-        ui.add_space(10.0);
-        ui.horizontal(|ui| {
-            ui.add_space(10.0);
-            if ui
-                .button("Load")
-                .on_hover_text("Load key to use for encryption\\decryption")
-                .clicked()
-            {
-                load_key(app).map_err(|_e| {}).unwrap_or_default();
-            };
-            ui.add_space(10.0);
-            ui.label("Or");
-            ui.add_space(10.0);
-            if ui
-                .button("Generate & Save")
-                .on_hover_text("Generate a key to use and save it")
-                .clicked()
-            {
-                generate_and_save_key(app)
-                    .map_err(|_e| {})
-                    .unwrap_or_default();
-            }
-        });
-        ui.add_space(10.0);
-    })
-}
-
-fn render_encryption_options(app: &mut VladsomwareApp, ui: &mut Ui) -> InnerResponse<()> {
-    ui.horizontal(|ui| {
-        ui.add_space(10.0);
+    fn render_dir_selector(&mut self, ui: &mut Ui, hover_text: &str) -> InnerResponse<()> {
         ui.vertical(|ui| {
+            ui.horizontal(|ui| {
+                ui.add_space(10.0);
+                ui.label("Directory to encrypt");
+            });
             ui.add_space(10.0);
-            let rec_response = ui.checkbox(&mut app.recursive, "Recursive")
-                .on_hover_text("Recursively Encrypt\\Decrypt all sub folders");
-            if rec_response.changed() {
-                app.encryptor.set_recursive(app.recursive);
-            }
-            ui.checkbox(&mut app.multi_threaded, "Multi-Threaded")
-                .on_hover_text("Encrypt\\Decrypt using multiple threads");
-            ui.add_space(10.0);
-        });
-    })
-}
+            ui.horizontal(|ui| {
+                ui.add_space(10.0);
+                let mut path_str = self.directory.display().to_string();
+                let text_edit_response = ui
+                    .add(egui::TextEdit::singleline(&mut path_str).desired_width(250.0))
+                    .on_hover_text(hover_text);
 
-fn render_big_button(
-    app: &mut VladsomwareApp,
-    ui: &mut Ui,
-    button_text: &str,
-    hover_text: &str,
-    encryption: bool,
-    button_color: impl Into<Color32>,
-) -> InnerResponse<()> {
-    let color: Color32 = button_color.into(); // copyable type
-    ui.horizontal(|ui| {
-        ui.add_space(20.0);
-        if ui
-            .add_sized(
-                [340.0, 40.0],
-                Button::image_and_text(
-                    Image::new(if encryption {
-                        &app.encrypt_tex
+                if text_edit_response.changed() {
+                    self.directory = PathBuf::from(path_str);
+                }
+
+                if ui.button("Browse...").on_hover_text(hover_text).clicked() {
+                    if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                        self.directory = path;
                     } else {
-                        &app.decrypt_tex
-                    })
-                    .max_width(25.0),
-                    RichText::new(button_text).color(Color32::from_rgb(255, 255, 255)),
-                )
-                .fill(color),
+                        warn!("No directory selected");
+                    }
+                }
+                ui.add_space(10.0);
+            });
+            ui.add_space(10.0);
+        })
+    }
+
+    fn load_key(&mut self) -> Result<(), String> {
+        let path = rfd::FileDialog::new()
+            .set_title("Load Encryption Key")
+            .add_filter("Key files", &["key", "bin"])
+            .add_filter("All files", &["*"])
+            .pick_file()
+            .ok_or("No File Selected")?;
+
+        self.encryptor
+            .load_key(&path)
+            .map_err(|e| format!("Failed to generate key: {}", e))?;
+        self.key_saved_or_loaded = true;
+        self.key_path = path.display().to_string();
+
+        Ok(())
+    }
+
+    fn generate_and_save_key(&mut self) -> Result<(), String> {
+        let path = rfd::FileDialog::new()
+            .set_title("Save Encryption Key")
+            .set_file_name("encryption_key.bin")
+            .add_filter("Key files", &["key", "bin"])
+            .add_filter("All files", &["*"])
+            .save_file()
+            .ok_or("No File Selected")?;
+
+        self.key_path = path.display().to_string();
+
+        self.encryptor
+            .gen_key(
+                path.file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or_default()
+                    .to_string(),
             )
-            .on_hover_text(hover_text)
-            .clicked()
-        {
-            if encryption {
-                app.encryptor.encrypt_dir(&app.directory);
-            } else {
-                app.encryptor.decrypt_dir(&app.directory);
-            }
-        };
-        ui.add_space(20.0);
-    })
-}
+            .map_err(|e| format!("Failed to generate key: {}", e))?;
 
-fn render_encrypt_button(app: &mut VladsomwareApp, ui: &mut Ui) -> InnerResponse<()> {
-    render_big_button(
-        app,
-        ui,
-        "Encrypt",
-        "Encrypt the files in the directory",
-        true,
-        Color32::from_rgb(188, 40, 46),
-    )
-}
+        let mut file = File::create(&path).map_err(|e| format!("Failed to create file: {}", e))?;
 
-fn render_decrypt_button(app: &mut VladsomwareApp, ui: &mut Ui) -> InnerResponse<()> {
-    render_big_button(
-        app,
-        ui,
-        "Decrypt",
-        "Decrypt files in the directory",
-        false,
-        Color32::from_rgb(155, 176, 179),
-    )
+        file.write_all(&self.encryptor.get_key_blob().unwrap())
+            .map_err(|e| format!("Failed to write key: {}", e))?;
+
+        self.key_saved_or_loaded = true;
+        Ok(())
+    }
+
+    fn render_encryption_key_handler(&mut self, ui: &mut Ui) -> InnerResponse<()> {
+        ui.vertical(|ui| {
+            ui.horizontal(|ui| {
+                ui.add_space(10.0);
+                ui.label("Encryption Key");
+            });
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                ui.add_space(10.0);
+                if ui
+                    .button("Load")
+                    .on_hover_text("Load key to use for encryption\\decryption")
+                    .clicked()
+                {
+                    self.load_key()
+                        .map_err(|e| {
+                            error!("{}", e);
+                        })
+                        .unwrap_or_default();
+                };
+                ui.add_space(10.0);
+                ui.label("Or");
+                ui.add_space(10.0);
+                if ui
+                    .button("Generate & Save")
+                    .on_hover_text("Generate a key to use and save it")
+                    .clicked()
+                {
+                    self.generate_and_save_key()
+                        .map_err(|e| {
+                            error!("{}", e);
+                        })
+                        .unwrap_or_default();
+                }
+            });
+            ui.add_space(10.0);
+        })
+    }
+
+    fn render_encryption_options(&mut self, ui: &mut Ui) -> InnerResponse<()> {
+        ui.horizontal(|ui| {
+            ui.add_space(10.0);
+            ui.vertical(|ui| {
+                ui.add_space(10.0);
+                let rec_response = ui
+                    .checkbox(&mut self.recursive, "Recursive")
+                    .on_hover_text("Recursively Encrypt\\Decrypt all sub folders");
+                if rec_response.changed() {
+                    self.encryptor.set_recursive(self.recursive);
+                }
+                ui.checkbox(&mut self.multi_threaded, "Multi-Threaded")
+                    .on_hover_text("Encrypt\\Decrypt using multiple threads");
+                ui.add_space(10.0);
+            });
+        })
+    }
+
+    fn render_big_button(
+        &mut self,
+        ui: &mut Ui,
+        button_text: &str,
+        hover_text: &str,
+        encryption: bool,
+        button_color: impl Into<Color32>,
+    ) -> InnerResponse<()> {
+        let color: Color32 = button_color.into(); // copyable type
+        ui.horizontal(|ui| {
+            ui.add_space(20.0);
+            if ui
+                .add_sized(
+                    [340.0, 40.0],
+                    Button::image_and_text(
+                        Image::new(if encryption {
+                            &self.encrypt_tex
+                        } else {
+                            &self.decrypt_tex
+                        })
+                        .max_width(25.0),
+                        RichText::new(button_text).color(Color32::from_rgb(255, 255, 255)),
+                    )
+                    .fill(color),
+                )
+                .on_hover_text(hover_text)
+                .clicked()
+            {
+                if encryption {
+                    self.encryptor.encrypt_dir(&self.directory);
+                } else {
+                    self.encryptor.decrypt_dir(&self.directory);
+                }
+            };
+            ui.add_space(20.0);
+        })
+    }
+
+    fn render_encrypt_button(&mut self, ui: &mut Ui) -> InnerResponse<()> {
+        self.render_big_button(
+            ui,
+            "Encrypt",
+            "Encrypt the files in the directory",
+            true,
+            Color32::from_rgb(188, 40, 46),
+        )
+    }
+
+    fn render_decrypt_button(&mut self, ui: &mut Ui) -> InnerResponse<()> {
+        self.render_big_button(
+            ui,
+            "Decrypt",
+            "Decrypt files in the directory",
+            false,
+            Color32::from_rgb(155, 176, 179),
+        )
+    }
+
+    fn save_logs(&mut self) -> Result<(), String> {
+        let path = rfd::FileDialog::new()
+            .set_title("Save logs")
+            .set_file_name("vladsomware.log")
+            .add_filter("Log files", &["log"])
+            .add_filter("All files", &["*"])
+            .save_file()
+            .ok_or("No file selected")?;
+
+        let mut file = File::create(&path).map_err(|e| format!("{:?}", e))?;
+        for log_context in &self.log_sink.collected() {
+            writeln!(file, "{}", log_context.payload).map_err(|e| format!("{:?}", e))?;
+        }
+
+        Ok(())
+    }
+
+    fn level_color(level: Level) -> Color32 {
+        match level {
+            Level::Critical | Level::Error => Color32::from_rgb(188, 40, 46),
+            Level::Warn => Color32::from_rgb(240, 200, 80),
+            Level::Info | Level::Debug | Level::Trace => Color32::from_rgb(155, 176, 179),
+        }
+    }
+
+    fn render_logs(&mut self, ui: &mut egui::Ui) -> InnerResponse<()> {
+        ui.vertical(|ui| {
+            ui.add_space(5.0);
+            ui.horizontal(|ui| {
+                ui.add_space(10.0);
+                ui.label("Log:");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("Save Logs").clicked() {
+                        self.save_logs()
+                            .map_err(|e| {
+                                error!("Failed to save logs: {}", e);
+                            })
+                            .unwrap_or_default();
+                    }
+                })
+            });
+            ui.add_space(5.0);
+            egui::ScrollArea::vertical()
+                .stick_to_bottom(true)
+                .show(ui, |ui| {
+                    for log_context in &self.log_sink.collected() {
+                        let styled_label = RichText::new(&log_context.payload)
+                            .font(FontId::proportional(15.0))
+                            .color(Self::level_color(log_context.level));
+                        ui.label(styled_label);
+                    }
+                });
+        })
+    }
 }
 
 impl App for VladsomwareApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
-        set_style(ctx);
+        self.set_style(ctx);
         CentralPanel::default().show(ctx, |ui| {
             ui.vertical(|ui| {
-                render_dir_selector(
-                    ui,
-                    &mut self.directory,
-                    "Path to directory to encrypt\\decrypt",
-                );
+                self.render_dir_selector(ui, "Path to directory to encrypt\\decrypt");
                 ui.separator();
-                render_encryption_key_handler(self, ui);
+                self.render_encryption_key_handler(ui);
                 ui.separator();
-                render_encryption_options(self, ui);
+                self.render_encryption_options(ui);
                 ui.separator();
                 ui.vertical(|ui| {
                     ui.add_space(5.0);
-                    render_encrypt_button(self, ui);
+                    self.render_encrypt_button(ui);
                     ui.add_space(5.0);
-                    render_decrypt_button(self, ui);
+                    self.render_decrypt_button(ui);
+                    ui.add_space(5.0);
+                    ui.add_space(5.0);
+
                 });
             });
         });
+
+        TopBottomPanel::bottom("Logs")
+            .exact_height(120.0)
+            .show(ctx, |ui| {
+                self.render_logs(ui);
+            });
     }
 }
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut viewport_builder = ViewportBuilder::default()
         .with_inner_size([400.0, 530.0])
         .with_resizable(false);
@@ -319,4 +395,6 @@ fn main() {
         win_options,
         Box::new(|_ctx| Ok(Box::new(VladsomwareApp::new(_ctx)))),
     );
+
+    Ok(())
 }

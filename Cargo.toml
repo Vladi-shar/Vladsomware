@@ -10,7 +10,9 @@ egui = "0.32.1"
 image = "0.25.6"
 rfd = "0.15.4"
 windows = {version = "0.62.0", features = ["Foundation_Collections", "Win32_Security_Cryptography", "Win32_Storage", "Win32_Storage_FileSystem"] }
-
+spdlog-rs = "0.4.3"
+spin = "0.9.8"
+atomic = "0.5.3"
 
 [build-dependencies]
 winres = "0.1.12"

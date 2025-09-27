@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::fs;
+use spdlog::{error, info, warn};
 use windows::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_DIRECTORY, WIN32_FIND_DATAW};
 use windows::{core::*, Win32::Security::Cryptography::*};
 
@@ -430,12 +431,12 @@ impl InnerEncryptor {
             match self.encryption_mode {
                 EncryptionMode::Encrypt => {
                     self.encrypt_file(&fp, processed_bytes).unwrap_or_else(|e| {
-                        std::println!("Failed to encrypt file {}, Error: {:?}", fp.display(), e);
+                        error!("Failed to encrypt file {}, Error: {:?}", fp.display(), e);
                     });
                 }
                 EncryptionMode::Decrypt => {
                     self.decrypt_file(&fp, processed_bytes).unwrap_or_else(|e| {
-                        std::println!("Failed to decrypt file {}, Error: {:?}", fp.display(), e);
+                        error!("Failed to decrypt file {}, Error: {:?}", fp.display(), e);
                     })
                 }
             }
@@ -444,19 +445,15 @@ impl InnerEncryptor {
 
     fn act_on_dir(&mut self, dir: &Path, depth: i32, total_bytes: u64, processed_bytes: u64) {
         if depth > 15 {
-            std::println!("too deep: {}", dir.display());
+            error!("too deep: {}", dir.display());
         }
         let mut search_pattern = dir.to_owned();
         search_pattern.push("*");
-        let result = enumerate_dir_entries(search_pattern, |fd| {
+        let _result = enumerate_dir_entries(search_pattern, |fd| {
             self.act_on_dir_entry(dir, fd, depth, total_bytes, processed_bytes)
+        }).map_err(|e| {
+            error!("Error enumerating directory entries: {}", e);
         });
-        if result.is_err() {
-            std::println!(
-                "error enumerating directory entries {}",
-                result.err().unwrap()
-            );
-        }
     }
     fn compute_entry_size(&mut self, dir: &Path, fd: &WIN32_FIND_DATAW, depth: i32) -> u64 {
         let file_name = name_from_find(&fd);
@@ -484,23 +481,25 @@ impl InnerEncryptor {
     fn encrypt_dir(&mut self, dir_path: &Path) {
         self.encryption_mode = EncryptionMode::Encrypt;
         let total_size_bytes = self.compute_dir_size(dir_path, 0);
-        std::println!("total size: {}", total_size_bytes);
+        info!("Encrypting \"{}\", total size : {}MB", dir_path.display(), total_size_bytes as f64 / 1000000.0);
         if total_size_bytes == 0 {
-            std::println!("nothing to encrypt");
+            warn!("{} nothing to encrypt", dir_path.display());
             return;
         }
         self.act_on_dir(dir_path, 0, total_size_bytes, 0);
+        info!("Encrypted \"{}\"", dir_path.display());
     }
 
     fn decrypt_dir(&mut self, dir_path: &Path) {
         self.encryption_mode = EncryptionMode::Decrypt;
         let total_size_bytes = self.compute_dir_size(dir_path, 0);
-        std::println!("total size: {}", total_size_bytes);
+        info!("Decrypting \"{}\", total size: {}MB", dir_path.display(), total_size_bytes as f64 / 1000000.0);
         if total_size_bytes == 0 {
-            std::println!("nothing to decrypt");
+            warn!("nothing to decrypt");
             return;
         }
         self.act_on_dir(dir_path, 0, total_size_bytes, 0);
+        info!("Decrypted \"{}\"", dir_path.display());
     }
 }
 

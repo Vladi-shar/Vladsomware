@@ -1,6 +1,7 @@
 mod encryptor;
+mod directory_enumerator;
 
-use crate::encryptor::Encryptor;
+use crate::encryptor::{Encryptor};
 use eframe::{
     egui::{self, CentralPanel},
     run_native,

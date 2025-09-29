@@ -56,7 +56,7 @@ impl VladsomwareApp {
         logger.set_level_filter(LevelFilter::MoreSevereEqual(Level::Info));
         spdlog::set_default_logger(logger.clone());
 
-        info!("Vladsomware2 started");
+        info!("Vladsomware started");
         Self {
             directory: PathBuf::new(),
             key_path: String::new(),
